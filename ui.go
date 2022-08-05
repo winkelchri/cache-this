@@ -3,14 +3,28 @@ package main
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/progress"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/sirupsen/logrus"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+)
+
+var (
+	highlight      = lipgloss.AdaptiveColor{Light: "#874BFD", Dark: "#7D56F4"}
+	highlightStyle = lipgloss.NewStyle().Foreground(highlight).Render
+
+	special      = lipgloss.AdaptiveColor{Light: "#43BF6D", Dark: "#73F59F"}
+	specialStyle = lipgloss.NewStyle().Foreground(special).Render
+
+	spinnerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
 )
 
 type model struct {
@@ -18,12 +32,15 @@ type model struct {
 	keymap   keymap
 	typing   bool
 	loading  bool
+	confirm  bool
+	reading  bool
 	err      error
 	// styles   common.Styles
 
 	help      help.Model
 	textInput textinput.Model
 	spinner   spinner.Model
+	progress  progress.Model
 }
 
 type keymap struct {
@@ -45,10 +62,7 @@ func (m model) helpView() string {
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-
-	var (
-		cmd tea.Cmd
-	)
+	var cmd tea.Cmd
 
 	// Handle key events
 	switch msg := msg.(type) {
@@ -61,9 +75,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// enter
 		case key.Matches(msg, m.keymap.enter):
+
+			// enter while typing state
 			if m.typing {
+				m.typing = false
+
 				if path := strings.TrimSpace(m.textInput.Value()); path != "" {
-					m.typing = false
 					m.loading = true
 
 					return m, tea.Batch(
@@ -71,6 +88,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.fetchDirectoryInfo(path),
 					)
 				}
+			}
+
+			// enter while reading state
+			if m.confirm {
+				m.confirm = false
+				m.reading = true
+
+				return m, tea.Batch(
+					spinner.Tick,
+					m.readDirectory(),
+				)
 			}
 
 		// back
@@ -84,6 +112,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// directory information returned
 	case GotDirectoryInfo:
 		m.loading = false
+		m.confirm = true
 
 		if err := msg.Err; err != nil {
 			m.err = err
@@ -91,6 +120,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		m.cacheDir = msg.DirectoryInfo
+
+	case ReadingFinished:
+		m.reading = false
+		if err := msg.Err; err != nil {
+			m.err = err
+			return m, nil
+		}
 	}
 
 	if m.typing {
@@ -101,45 +137,57 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.spinner, cmd = m.spinner.Update(msg)
 	}
 
+	if m.reading {
+		m.spinner, cmd = m.spinner.Update(msg)
+	}
+
 	return m, cmd
 }
 
+// View is responsible for rendering screen information.
 func (m model) View() string {
+	log.SetLevel(logrus.ErrorLevel)
+	var s string
 
 	// typing mode
 	if m.typing {
-		return fmt.Sprintf(
-			"Enter directory:\n%s\n%s",
-			m.textInput.View(),
-			m.helpView(),
-		)
+		s += "Enter directory:\n"
+		s += m.textInput.View()
 	}
 
 	// loading mode
 	if m.loading {
-		return fmt.Sprintf(
-			"%s loading directory info. Please wait...",
-			m.spinner.View(),
-		)
+		s += m.spinner.View()
+		s += " loading directory info. Please wait..."
 	}
 
 	// error mode
 	if err := m.err; err != nil {
-		return fmt.Sprintf(
-			"Error fetching directory info: %v\n%s",
-			err,
-			m.helpView(),
-		)
+		s += "Error fetching directory info: "
+		s += err.Error()
+	}
+
+	// reading directory contents
+	if m.reading {
+		// n := m.cacheDir.numFiles
+		// w := lipgloss.Width(fmt.Sprintf("%d", n))
+		s = m.progress.View() + "\n\n"
+		s += m.spinner.View() + "Reading files. Please wait..."
 	}
 
 	// default state
-	return fmt.Sprintf(
-		"Found %d files in '%s'. Total size: %.2f MB.\n%s",
-		m.cacheDir.numFiles,
-		m.cacheDir.path,
-		SizeInMB(m.cacheDir.sizeDir),
-		m.helpView(),
-	)
+	if s == "" {
+		s = fmt.Sprintf(
+			"Found %s files in '%s'.\nTotal size: %.2f MB.",
+			highlightStyle(strconv.FormatInt(m.cacheDir.numFiles, 10)),
+			specialStyle(m.cacheDir.path),
+			SizeInMB(m.cacheDir.sizeDir),
+		)
+	}
+
+	s += "\n" + m.helpView()
+
+	return s
 }
 
 type GotDirectoryInfo struct {
@@ -158,6 +206,33 @@ func (m model) fetchDirectoryInfo(path string) tea.Cmd {
 	}
 }
 
+/*
+TODO: 	Animate readDirectory. Spinner is boring!
+*/
+
+type ReadingFinished struct {
+	Err  error
+	Done bool
+}
+
+func (m model) readDirectory() tea.Cmd {
+	// TODO: 	Possibly rewrite with go routines.
+	// 			See bubbletea/examples/send-msg
+
+	return func() tea.Msg {
+		var err error
+		for _, each := range m.cacheDir.files {
+			err = each.Read()
+		}
+
+		if err != nil {
+			return ReadingFinished{Err: err, Done: false}
+		}
+
+		return ReadingFinished{Done: true}
+	}
+}
+
 func initialModel() model {
 	t := textinput.NewModel()
 	t.Focus()
@@ -165,11 +240,15 @@ func initialModel() model {
 
 	s := spinner.NewModel()
 	s.Spinner = spinner.Dot
+	s.Style = spinnerStyle
+
+	pr := progress.New(progress.WithDefaultGradient())
 
 	m := model{
 		textInput: t,
 		spinner:   s,
 		typing:    true,
+		progress:  pr,
 		keymap: keymap{
 			enter: key.NewBinding(
 				key.WithKeys("enter"),

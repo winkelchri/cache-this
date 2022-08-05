@@ -6,12 +6,13 @@ import (
 	"io/fs"
 	"math"
 	"os"
+	"path/filepath"
 	"sort"
 
 	"github.com/karrick/godirwalk"
 )
 
-var bufSize = 4 * 1024
+var bufSize = 16 * 1024
 
 type CacheDir struct {
 	path     string
@@ -92,9 +93,17 @@ func (file File) Read() error {
 
 // GetDirectoryInfo walks the given directory and returns a CacheDir object
 func GetDirectoryInfo(path string) (CacheDir, error) {
+
+	// FIXME: 	Currently issue with os specific paths
+	// 			Reading seems to be broken due to filepath object?
+
+	// Convert path to os specific path notation
+	path = filepath.Clean(path)
+
 	var c = CacheDir{path: path}
 
 	log.Infof("Getting files of directory: '%s'", path)
+
 	err := godirwalk.Walk(path, &godirwalk.Options{
 		Callback: func(osPathname string, de *godirwalk.Dirent) error {
 			stats, err := os.Stat(osPathname)
@@ -115,7 +124,8 @@ func GetDirectoryInfo(path string) (CacheDir, error) {
 		Unsorted: true, // (optional) set true for faster yet non-deterministic enumeration (see godoc)
 	})
 
-	if err != nil {
+	// Windows returns EOF in case of empty folders
+	if err != nil && err.Error() != "EOF" {
 		return CacheDir{}, err
 	}
 
