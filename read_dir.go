@@ -8,8 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-
-	"github.com/karrick/godirwalk"
 )
 
 var bufSize = 16 * 1024
@@ -104,28 +102,24 @@ func GetDirectoryInfo(path string) (CacheDir, error) {
 
 	log.Infof("Getting files of directory: '%s'", path)
 
-	err := godirwalk.Walk(path, &godirwalk.Options{
-		Callback: func(osPathname string, de *godirwalk.Dirent) error {
-			stats, err := os.Stat(osPathname)
+	err := filepath.Walk(path, func(osPathname string, info fs.FileInfo, err error) error {
+		if err != nil {
+			log.Errorln(err)
+			// TODO: Possible cause of error during runtime. Investigate how to skip files which cannot be readed.
+		}
 
-			if err != nil {
-				log.Errorln(err)
-				return godirwalk.SkipThis
-			}
+		c.files = append(c.files, File{path: osPathname, info: info})
+		if !info.IsDir() {
+			c.numFiles++
+		}
+		c.sizeDir += info.Size()
 
-			c.files = append(c.files, File{path: osPathname, info: stats})
-			if !stats.Mode().IsDir() {
-				c.numFiles++
-			}
-			c.sizeDir += stats.Size()
-
-			return nil
-		},
-		Unsorted: true, // (optional) set true for faster yet non-deterministic enumeration (see godoc)
+		return nil
 	})
 
 	// Windows returns EOF in case of empty folders
-	if err != nil && err.Error() != "EOF" {
+	// if err != nil && err.Error() != "EOF" {
+	if err != nil {
 		return CacheDir{}, err
 	}
 

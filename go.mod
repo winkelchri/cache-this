@@ -7,7 +7,6 @@ require (
 	github.com/charmbracelet/bubbletea v0.22.0
 	github.com/charmbracelet/lipgloss v0.5.0
 	github.com/fatih/color v1.13.0
-	github.com/karrick/godirwalk v1.17.0
 	github.com/sirupsen/logrus v1.9.0
 )
 
