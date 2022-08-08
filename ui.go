@@ -1,10 +1,15 @@
 package main
 
+/*
+	Heavily borrowed from https://github.com/charmbracelet/bubbletea. Such an awesome library! <3
+*/
+
 import (
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
@@ -18,14 +23,54 @@ import (
 )
 
 var (
-	highlight      = lipgloss.AdaptiveColor{Light: "#874BFD", Dark: "#7D56F4"}
+	program   *tea.Program
+	highlight = lipgloss.AdaptiveColor{Light: "#874BFD", Dark: "#7D56F4"}
+	special   = lipgloss.AdaptiveColor{Light: "#43BF6D", Dark: "#73F59F"}
+
 	highlightStyle = lipgloss.NewStyle().Foreground(highlight).Render
-
-	special      = lipgloss.AdaptiveColor{Light: "#43BF6D", Dark: "#73F59F"}
-	specialStyle = lipgloss.NewStyle().Foreground(special).Render
-
-	spinnerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
+	specialStyle   = lipgloss.NewStyle().Foreground(special).Render
+	spinnerStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
+	helpStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Margin(1, 0)
+	dotStyle       = helpStyle.Copy().UnsetMargins()
+	durationStyle  = dotStyle.Copy()
 )
+
+const (
+	numDisplayResults = 10
+)
+
+type resultMsg struct {
+	duration   time.Duration
+	file       string
+	err        error
+	done       bool
+	filesTotal int
+	filesRead  int
+}
+
+func (r resultMsg) String() string {
+	var s string
+
+	if r.file == "" {
+		s = dotStyle.Render(strings.Repeat(".", 30))
+	}
+
+	if r.err != nil {
+		s = fmt.Sprintf("⚠️ Error reading '%s': %s", highlightStyle(r.file), r.err.Error())
+	}
+
+	if s == "" {
+		s = fmt.Sprintf(
+			"🔍 (%d/%d) Reading '%s' took %s",
+			r.filesRead,
+			r.filesTotal,
+			highlightStyle(r.file),
+			durationStyle.Render(r.duration.String()),
+		)
+	}
+
+	return s
+}
 
 type model struct {
 	cacheDir *CacheDir
@@ -34,7 +79,9 @@ type model struct {
 	loading  bool
 	confirm  bool
 	reading  bool
+	done     bool
 	err      error
+	results  []resultMsg
 	// styles   common.Styles
 
 	help      help.Model
@@ -61,6 +108,7 @@ func (m model) helpView() string {
 	})
 }
 
+// Update function will be run upon various different events
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 
@@ -95,9 +143,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.confirm = false
 				m.reading = true
 
+				m.readDirectory()
 				return m, tea.Batch(
 					spinner.Tick,
-					m.readDirectory(),
 				)
 			}
 
@@ -108,6 +156,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.err = nil
 			}
 		}
+
+	// Not really sure if we need this
+	case spinner.TickMsg:
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		return m, cmd
+
+	// FrameMsg is sent when the progress bar wants to animate itself
+	case progress.FrameMsg:
+		newModel, cmd := m.progress.Update(msg)
+		if newModel, ok := newModel.(progress.Model); ok {
+			m.progress = newModel
+		}
+		return m, cmd
 
 	// directory information returned
 	case GotDirectoryInfo:
@@ -127,6 +189,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.err = err
 			return m, nil
 		}
+
+	case resultMsg:
+		if msg.done {
+			m.done = true
+			return m, tea.Quit
+		}
+
+		m.results = append(m.results[1:], msg)
+
+		cmd := m.progress.SetPercent(float64(msg.filesRead)/float64(msg.filesTotal) - 1)
+		if msg.filesRead >= msg.filesTotal {
+			m.reading = false
+			// cmd = func() tea.Msg {
+			// 	return ReadingFinished{Done: true}
+			// }
+		}
+		return m, tea.Batch(
+			spinner.Tick,
+			cmd,
+		)
 	}
 
 	if m.typing {
@@ -148,6 +230,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) View() string {
 	log.SetLevel(logrus.ErrorLevel)
 	var s string
+
+	if m.done {
+		return fmt.Sprintf("Done reading %d files.\n", len(m.cacheDir.files))
+	}
 
 	// typing mode
 	if m.typing {
@@ -171,8 +257,12 @@ func (m model) View() string {
 	if m.reading {
 		// n := m.cacheDir.numFiles
 		// w := lipgloss.Width(fmt.Sprintf("%d", n))
-		s = m.progress.View() + "\n\n"
-		s += m.spinner.View() + "Reading files. Please wait..."
+		// s = m.progress.View() + "\n\n"
+		s += m.spinner.View() + "Reading files. Please wait...\n\n"
+
+		for _, res := range m.results {
+			s += res.String() + "\n"
+		}
 	}
 
 	// default state
@@ -215,22 +305,46 @@ type ReadingFinished struct {
 	Done bool
 }
 
-func (m model) readDirectory() tea.Cmd {
-	// TODO: 	Possibly rewrite with go routines.
-	// 			See bubbletea/examples/send-msg
+// func (m model) readDirectory() tea.Cmd {
+func (m model) readDirectory() {
 
-	return func() tea.Msg {
-		var err error
+	go func() {
+		var (
+			start      time.Time
+			duration   time.Duration
+			err        error
+			filesTotal int
+			filesRead  int
+		)
+
+		filesTotal = len(m.cacheDir.files)
+
 		for _, each := range m.cacheDir.files {
+			start = time.Now()
+
 			err = each.Read()
+			filesRead += 1
+
+			if err != nil {
+				continue
+			}
+
+			duration = time.Since(start)
+
+			program.Send(resultMsg{
+				duration:   duration,
+				err:        err,
+				file:       each.path,
+				filesRead:  filesRead,
+				filesTotal: filesTotal,
+				done:       false,
+			})
 		}
 
-		if err != nil {
-			return ReadingFinished{Err: err, Done: false}
-		}
-
-		return ReadingFinished{Done: true}
-	}
+		program.Send(resultMsg{
+			done: true,
+		})
+	}()
 }
 
 func initialModel() model {
@@ -244,11 +358,15 @@ func initialModel() model {
 
 	pr := progress.New(progress.WithDefaultGradient())
 
+	results := make([]resultMsg, numDisplayResults)
+
 	m := model{
-		textInput: t,
-		spinner:   s,
-		typing:    true,
+		done:      false,
 		progress:  pr,
+		results:   results,
+		spinner:   s,
+		textInput: t,
+		typing:    true,
 		keymap: keymap{
 			enter: key.NewBinding(
 				key.WithKeys("enter"),
@@ -266,14 +384,13 @@ func initialModel() model {
 		help: help.NewModel(),
 	}
 
-	// m.keymap.back.SetEnabled(false)
-
 	return m
 }
 
 func StartUI() {
 	// if err := tea.NewProgram(initialModel(), tea.WithAltScreen()).Start(); err != nil {
-	if err := tea.NewProgram(initialModel()).Start(); err != nil {
+	program = tea.NewProgram(initialModel(), tea.WithAltScreen())
+	if err := program.Start(); err != nil {
 		fmt.Printf("could not start program: %s\n", err)
 		os.Exit(1)
 	}
