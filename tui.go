@@ -307,6 +307,8 @@ type ReadingFinished struct {
 
 // func (m model) readDirectory() tea.Cmd {
 func (m model) readDirectory() {
+	// FIXME: 	Subfunction is not needed here because CMD functions are
+	// 	 		called as subfunctions already.
 
 	go func() {
 		var (

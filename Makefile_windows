@@ -1,5 +1,0 @@
-windows:
-    $Env:GOOS="windows"; $Env:GOARCH="amd64"; go build -o bin/win/cache-this.exe
-
-linux:
-    $Env:GOOS="linux"; $Env:GOARCH="amd64"; go build -o bin/linux/cache-this

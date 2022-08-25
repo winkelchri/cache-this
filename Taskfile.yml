@@ -1,0 +1,31 @@
+version: "3"
+
+tasks:
+  init:
+    cmds:
+      - go install github.com/goreleaser/goreleaser@latest
+      - goreleaser init
+
+  build:
+    cmds:
+      - goreleaser release --snapshot --rm-dist
+
+  check:
+    cmds:
+      - goreleaser check
+
+  run:
+    cmds:
+      - go run .
+
+  update:
+    cmds:
+      - go get -u
+
+  test:
+    cmds:
+      - go test .
+
+  clean:
+    cmds:
+      - bash -c "rm -rf dist/"
